@@ -118,7 +118,7 @@ class CasiaWebFace(Dataset):
         return len(self.imgidx)
 
 # %%
-full_dataset = CasiaWebFace("/data/ozgur/faces_webface_112x112/casia_training", 0, NUM_CLASSES, NUM_SAMPLES_PER_CLASS, True)
+full_dataset = CasiaWebFace("/data/ozgur/casia_training", 0, NUM_CLASSES, NUM_SAMPLES_PER_CLASS, True)
 assert len(full_dataset) == NUM_CLASSES * NUM_SAMPLES_PER_CLASS, "Dataset size does not match expected size. Expected: {}, Found: {}".format(
     NUM_CLASSES * NUM_SAMPLES_PER_CLASS, len(full_dataset)
 )
@@ -132,7 +132,7 @@ random_sampler = RandomSampler(full_dataset, generator=generator)
 dl = DataLoader(
     full_dataset,
     sampler=random_sampler,
-    batch_size=20,
+    batch_size=64,
     num_workers=0,
     shuffle=False,
     pin_memory=True,
@@ -154,6 +154,26 @@ inverse_normalize = transforms.Compose([
 ])
 
 # %%
+
+def extract_parameters(backbone: nn.Module, header: nn.Module) -> list:
+    """
+    Extract the parameters of the model that require gradients and are therefore trainable.
+    Args:
+        model (nn.Module): The model from which to extract parameters.
+    """
+    parameters = []
+
+    for layer in list(backbone.children())[0:-2]:
+        for param in layer.parameters():
+            param.requires_grad_(False)
+
+    parameters += list(backbone.children())[-2].parameters()
+
+    for param in header.parameters():
+        if param.requires_grad:
+            parameters.append(param)
+
+    return parameters
 
 def load_checkpoint(backbone: nn.Module, header, checkpoint_path: str):
     """
@@ -181,6 +201,7 @@ def load_checkpoint(backbone: nn.Module, header, checkpoint_path: str):
 
 
 def calc_gradients(inputs: torch.Tensor, labels: torch.Tensor):
+    params = extract_parameters(backbone, header)
     with torch.autograd.set_grad_enabled(True):
         # Forward pass
         features = backbone(inputs)
@@ -190,7 +211,7 @@ def calc_gradients(inputs: torch.Tensor, labels: torch.Tensor):
         assert loss.shape[0] == thetas.shape[0], "Loss and output batch sizes do not match."
 
         # print("Loss shape:", loss.shape)
-        grads_list = [torch.autograd.grad(outputs=loss[i], inputs=thetas, grad_outputs=torch.ones_like(
+        grads_list = [torch.autograd.grad(outputs=loss[i], inputs=params, grad_outputs=torch.ones_like(
             loss[i]), retain_graph=True) for i in range(loss.shape[0])]
         # print("gradients list length:", grads_list[0])
         grads = [torch.stack(x) for x in zip(*grads_list)]
@@ -201,6 +222,7 @@ def calc_gradients(inputs: torch.Tensor, labels: torch.Tensor):
 # %%
 def main():
     checkpoint_paths = [CHECKPOINTS_PATH_FORMAT.format(i * 4790) for i in range(1, 5)]  # use every tenth epoch as a checkpoint to evaluate
+    print(checkpoint_paths)
     
     # Process each checkpoint
     for checkpoint_idx, checkpoint_path in enumerate(checkpoint_paths):
@@ -224,7 +246,7 @@ def main():
         checkpoint_dl = DataLoader(
             full_dataset,
             sampler=checkpoint_sampler,
-            batch_size=20,
+            batch_size=64,
             num_workers=0,
             shuffle=False,
             pin_memory=True,
@@ -238,6 +260,8 @@ def main():
 
             # Calculate gradients
             gradients = calc_gradients(samples, labels)
+
+            print("gradient shapes:", [g.shape for g in gradients])
             
             # Dump gradients in same folder structure as images
             dump_gradients_by_structure(gradients, labels, imageindex, full_dataset, checkpoint_output_dir)
